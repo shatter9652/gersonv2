@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Gerson Shield Fight</title>
+<style>
+  body { margin:0; background:#000; overflow:hidden; color:#fff; font-family:sans-serif; }
+  canvas { display:block; margin:0 auto; background:#000; }
+  #overlay { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="600" height="600"></canvas>
+<div id="overlay"></div>
+<script>
+const WIDTH = 600, HEIGHT = 600, CENTER = {x:WIDTH/2, y:HEIGHT/2};
+const soulRadius = 10;
+const boxSize = soulRadius*4;
+const shieldThickness = 6, frameThickness = 1;
+const FPS = 60;
+const TRAVEL_TIME = 2.5;
+const upgradeTime = 12000;
+const rampStart = 12000, rampInterval = 8000;
+const maxArrowsPerSec = 4;
+
+let canvas = document.getElementById('game');
+let ctx = canvas.getContext('2d');
+let keys = {};
+let arrows = [];
+let arrowSpawnQueue = [];
+
+let score = 0, highScore = 0, hp = 3;
+let octagonMode = false, shieldAngle = 90;
+let lastArrowAngle = 0;
+let arrowsPerSec = 2;
+let lastRamp = rampStart;
+let startTicks = 0;
+let arrowTimer = 0;
+let startScreen = true, gameOver = false;
+
+const DIRECTION_ORDER_8 = [0,45,90,135,180,225,270,315];
+const DIRECTIONS = {
+  0:[1,0], 45:[Math.SQRT1_2, -Math.SQRT1_2], 90:[0,-1],
+  135:[-Math.SQRT1_2,-Math.SQRT1_2], 180:[-1,0],
+  225:[-Math.SQRT1_2,Math.SQRT1_2],270:[0,1],
+  315:[Math.SQRT1_2,Math.SQRT1_2]
+};
+
+// optionally preload images
+let soulImg = new Image();
+soulImg.src = 'assets/soul.png';
+let arrowImgs = {}, redArrowImgs = {};
+[0,45,90,135,180,225,270,315].forEach(angle => {
+  let fname = ''+angle;
+  arrowImgs[angle] = new Image();
+  arrowImgs[angle].src = `assets/arrow_${angle}.png`;
+  redArrowImgs[angle] = new Image();
+  redArrowImgs[angle].src = `assets/red_arrow_${angle}.png`;
+});
+
+let sfx_block = new Audio('assets/block.wav');
+let sfx_hit = new Audio('assets/hurt.wav');
+let sfx_gameOver = new Audio('assets/game_over.wav');
+let music = new Audio('assets/music.ogg');
+music.loop = true;
+music.volume = 0.4;
+sfx_block.volume=0.2;
+sfx_hit.volume=0.5;
+sfx_gameOver.volume=0.5;
+
+function drawText(text,x,y,color='white',size=30) {
+  ctx.fillStyle = color;
+  ctx.font = size+'px sans-serif';
+  ctx.fillText(text, x, y);
+}
+
+function queueArrow() {
+  let angle;
+  if (octagonMode) {
+    let roll = Math.random(), idx = DIRECTION_ORDER_8.indexOf(lastArrowAngle);
+    if (roll<0.25) angle = DIRECTION_ORDER_8[(idx-1+8)%8];
+    else if (roll<0.5) angle = DIRECTION_ORDER_8[(idx+1)%8];
+    else angle = DIRECTION_ORDER_8[Math.floor(Math.random()*8)];
+  } else {
+    angle = [0,90,180,270][Math.floor(Math.random()*4)];
+  }
+  lastArrowAngle = angle;
+  let [dx,dy] = DIRECTIONS[angle];
+  let speed = 2.5 + Math.random()*3.0;
+  let dist = speed * TRAVEL_TIME * FPS;
+  let x = CENTER.x + dx*dist;
+  let y = CENTER.y + dy*dist;
+  arrowSpawnQueue.push({
+    spawnAt: performance.now() + TRAVEL_TIME*1000,
+    data: {x,y,vx:-dx*speed,vy:-dy*speed,angle}
+  });
+}
+
+function updateArrows() {
+  let hitRadius = boxSize/2 - 10;
+  let blockRadius = boxSize/2 + 10;
+  arrows = arrows.filter(a => {
+    a.x += a.vx;
+    a.y += a.vy;
+    let dx = a.x - CENTER.x, dy = a.y - CENTER.y;
+    let dist = Math.hypot(dx,dy);
+    if (dist < hitRadius) {
+      if (a.angle !== shieldAngle) {
+        hp--; sfx_hit.play();
+      }
+      return false;
+    } else if (dist < blockRadius) {
+      if (a.angle === shieldAngle) {
+        score++; sfx_block.play();
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function drawArrows() {
+  let closest = -1, minDist = Infinity;
+  arrows.forEach((a,i)=>{
+    let dx=a.x-CENTER.x, dy=a.y-CENTER.y;
+    let d = dx*dx+dy*dy;
+    if (d<minDist){minDist=d; closest=i;}
+  });
+  arrows.forEach((a,i)=>{
+    let img = (i===closest ? redArrowImgs[a.angle] : arrowImgs[a.angle]);
+    ctx.drawImage(img, a.x - img.width/2, a.y - img.height/2);
+  });
+}
+
+function drawShield() {
+  ctx.strokeStyle = 'green';
+  ctx.lineWidth = frameThickness;
+  let cx=CENTER.x, cy=CENTER.y;
+  if (!octagonMode) {
+    let half=boxSize/2;
+    ctx.strokeRect(cx-half,cy-half,boxSize,boxSize);
+    ctx.strokeStyle='white';
+    ctx.lineWidth = shieldThickness;
+    ctx.beginPath();
+    if (shieldAngle===90) ctx.moveTo(cx-half,cy-half),ctx.lineTo(cx+half,cy-half);
+    if (shieldAngle===270) ctx.moveTo(cx-half,cy+half),ctx.lineTo(cx+half,cy+half);
+    if (shieldAngle===180) ctx.moveTo(cx-half,cy-half),ctx.lineTo(cx-half,cy+half);
+    if (shieldAngle===0) ctx.moveTo(cx+half,cy-half),ctx.lineTo(cx+half,cy+half);
+    ctx.stroke();
+  } else {
+    let r = boxSize/Math.sqrt(2);
+    let pts = [];
+    for (let i=0;i<8;i++){
+      let ang=45*i - 22.5;
+      pts.push({
+        x: cx + r*Math.cos(ang*Math.PI/180),
+        y: cy - r*Math.sin(ang*Math.PI/180)
+      });
+    }
+    ctx.strokeStyle='green'; ctx.lineWidth=frameThickness;
+    ctx.beginPath();
+    pts.forEach((p,i)=> i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+    ctx.closePath(); ctx.stroke();
+    let idx = DIRECTION_ORDER_8.indexOf(shieldAngle);
+    let p1=pts[idx], p2=pts[(idx+1)%8];
+    ctx.strokeStyle='white'; ctx.lineWidth=shieldThickness;
+    ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+  }
+}
+
+function getDirectionFromKeys() {
+  if (!octagonMode) {
+    if (keys['ArrowUp']) return 90;
+    if (keys['ArrowDown']) return 270;
+    if (keys['ArrowLeft']) return 180;
+    if (keys['ArrowRight']) return 0;
+  } else {
+    let up=keys['ArrowUp'], down=keys['ArrowDown'];
+    let left=keys['ArrowLeft'], right=keys['ArrowRight'];
+    if (up && left) return 135;
+    if (up && right) return 45;
+    if (down && left) return 225;
+    if (down && right) return 315;
+    if (up) return 90;
+    if (down) return 270;
+    if (left) return 180;
+    if (right) return 0;
+  }
+  return null;
+}
+
+function gameLoop() {
+  ctx.clearRect(0,0,WIDTH,HEIGHT);
+  if (startScreen) {
+    drawText("GERSON SHIELD FIGHT", WIDTH/2-160, HEIGHT/2-60, 'green', 40);
+    drawText("Use arrow keys to rotate the shield.", WIDTH/2-170, HEIGHT/2-20, 'white',30);
+    drawText("Block arrows from hitting the soul.", WIDTH/2-170, HEIGHT/2+10, 'white',30);
+    drawText("Press any key to start!", WIDTH/2-120, HEIGHT/2+60, 'gold',30);
+  } else if (!gameOver) {
+    let now = performance.now();
+    if (now >= rampStart && now - lastRamp >= rampInterval) {
+      if (arrowsPerSec < maxArrowsPerSec) {
+        arrowsPerSec += 0.05;
+        lastRamp = now;
+      }
+    }
+    if (now - startTicks >= upgradeTime) {
+      octagonMode = true;
+    }
+    arrowTimer++;
+    let arrowInterval = FPS/arrowsPerSec;
+    if (arrowTimer >= arrowInterval) {
+      queueArrow();
+      arrowTimer = 0;
+    }
+    arrowSpawnQueue = arrowSpawnQueue.filter(item => {
+      if (now >= item.spawnAt) {
+        arrows.push(item.data);
+        return false;
+      }
+      return true;
+    });
+    let dir = getDirectionFromKeys();
+    if (dir !== null) shieldAngle = dir;
+    updateArrows();
+    drawArrows();
+    ctx.drawImage(soulImg, CENTER.x - soulImg.width/2, CENTER.y - soulImg.height/2);
+    drawShield();
+    drawText(`Score: ${score}`,10,30);
+    drawText(`High Score: ${highScore}`,10,60);
+    drawText(`HP: ${hp}`,10,90);
+    drawText(`Time: ${Math.floor((now-startTicks)/1000)}`, 10,120);
+    if (hp <= 0) {
+      gameOver = true;
+      music.pause();
+      sfx_gameOver.play();
+      highScore = Math.max(highScore, score);
+    }
+  } else {
+    drawText("GAME OVER", WIDTH/2 - 70, HEIGHT/2 - 30, 'red',40);
+    drawText("Press R to Restart", WIDTH/2 - 100, HEIGHT/2 + 20, 'white',30);
+    drawText(`Score: ${score}`, WIDTH/2 - 45, HEIGHT/2 + 60, 'white',20);
+    drawText(`High Score: ${highScore}`, WIDTH/2 - 60, HEIGHT/2 + 80, 'white',20);
+  }
+  requestAnimationFrame(gameLoop);
+}
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (startScreen) {
+    startScreen = false;
+    startTicks = performance.now();
+    lastRamp = performance.now();
+    music.currentTime = 0; music.play();
+  } else if (gameOver && e.code === 'KeyR') {
+    arrows = []; arrowSpawnQueue = [];
+    score = 0; hp = 3; shieldAngle = 90;
+    arrowsPerSec = 2; octagonMode = false;
+    startTicks = performance.now(); lastRamp = performance.now();
+    gameOver = false;
+    music.currentTime = 0; music.play();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
